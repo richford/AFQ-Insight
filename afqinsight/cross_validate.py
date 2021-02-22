@@ -4,6 +4,7 @@ import copy
 import deepdish.io as ddio
 import hashlib
 import json
+import pandas as pd
 import numpy as np
 import os
 import pickle
@@ -11,9 +12,13 @@ import pickle
 from joblib import delayed, Parallel
 from sklearn.base import clone, is_classifier
 from sklearn.metrics._scorer import _check_multimetric_scoring
+from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.model_selection._split import check_cv
 from sklearn.model_selection._validation import _aggregate_score_dicts, _fit_and_score
-from sklearn.pipeline import Pipeline
+from sklearn.manifold import Isomap
+from sklearn.neighbors import KNeighborsTransformer
+from sklearn.cluster import KMeans
+from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.utils import indexable
 
 __all__ = ["cross_validate_checkpoint"]
@@ -464,3 +469,71 @@ def cross_validate_checkpoint(
             ret[key] = np.array(train_scores[name])
 
     return ret
+
+
+def stratified_crossvalidate(
+    covariate_df,
+    pipeline_estimator=None,
+    cv_splitter=StratifiedShuffleSplit(n_splits=1, test_size=0.25),
+):
+    """
+    Given multiple covariates in covariate_df, returns training and test splits
+    such that covariate distributions are similar across both training and test splits
+
+    Parameters
+    ----------
+    covariate_df : pandas dataframe of shape (n_samples, n_features)
+
+    pipeline_estimator : default=None
+        Custom pipeline not yet supported
+
+    cv_splitter : A cv object default=StratifiedShuffleSplit
+        A scikit-learn object for splitting the dataset into
+        train/test set such that splits are stratified
+
+    Yields
+    ------
+    train : ndarray
+        The training set indices for one shuffle split
+    test : ndarray
+        The testing set indices for one shuffle split
+    covariate: ndarray
+        The composite covariate used to stratify training and test splits
+
+    """
+
+    # Check covariate_df is a dataframe
+    if not isinstance(covariate_df, pd.DataFrame):
+        raise TypeError
+
+    X = covariate_df.to_numpy()
+
+    if pipeline_estimator is None:
+        pipeline_estimator = make_pipeline(
+            KNeighborsTransformer(n_neighbors=10, mode="distance"),
+            Isomap(n_components=5, neighbors_algorithm="auto"),
+        )
+
+    X_reduced = pipeline_estimator.fit_transform(X)
+    cluster_stratify = KMeans(n_clusters=5).fit_predict(X_reduced)
+
+    for foldno, (train_index, test_index) in enumerate(
+        cv_splitter.split(X, cluster_stratify)
+    ):
+        print("Fold No: {}".format(foldno))
+        train_clusters, train_freq = np.unique(
+            cluster_stratify[train_index], return_counts=True
+        )
+        test_clusters, test_freq = np.unique(
+            cluster_stratify[test_index], return_counts=True
+        )
+        print("Training data: Cluster frequency")
+        print(train_clusters)
+        print(train_freq)
+        print(test_clusters)
+        print(test_freq)
+
+    train_keys = covariate_df.index[train_index]
+    test_keys = covariate_df.index[test_index]
+
+    return train_keys, test_keys, cluster_stratify
